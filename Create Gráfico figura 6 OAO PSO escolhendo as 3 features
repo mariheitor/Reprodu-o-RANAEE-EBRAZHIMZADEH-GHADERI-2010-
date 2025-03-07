@@ -1,0 +1,155 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from sklearn.model_selection import train_test_split
+from sklearn.svm import SVC
+from sklearn.metrics import accuracy_score
+from scipy.stats import skew, kurtosis
+import random
+import urllib.request
+
+# Baixar os dados
+url = "https://kdd.ics.uci.edu/databases/synthetic_control/synthetic_control.data"
+file_path = "synthetic_control.data"
+urllib.request.urlretrieve(url, file_path)
+
+# Carregar os dados
+def load_data(file_path):
+    data = np.loadtxt(file_path)
+    labels = np.repeat(np.arange(6), 100)  # 6 classes, 100 instâncias cada
+    return data, labels
+
+# Extração de características
+def extract_features(data):
+    features = []
+    for series in data:
+        feature_vector = [
+            np.mean(series),
+            np.std(series),
+            skew(series),
+            kurtosis(series),
+            np.polyfit(range(len(series)), series, 1)[0],  # Slope (S)
+            np.sum(np.diff(np.sign(series - np.mean(series)))) // 2,  # NC1
+            np.sum(np.diff(np.sign(series - np.polyfit(range(len(series)), series, 1)[1]))) // 2,  # NC2
+            np.mean(np.abs(np.diff(series))),  # AS
+            np.abs(np.polyfit(range(len(series)), series, 1)[0] - np.mean(np.abs(np.diff(series)))),  # SD
+            np.sum(np.abs(series - np.mean(series))),  # APML
+            np.sum(np.abs(series - np.polyfit(range(len(series)), series, 1)[1])),  # APSL
+            np.sum(np.abs(np.polyfit(range(len(series)), series, 1)[1] - np.mean(np.abs(np.diff(series))))),  # ASS
+        ]
+        features.append(feature_vector)
+    return np.array(features)
+
+# Função para otimizar os parâmetros com PSO
+def objective_function(params, X_train, y_train, X_test, y_test, feature_names):
+    C, gamma = params[:2]
+    selected_indices = sorted(np.argsort(params[2:])[-3:])  
+
+    X_train_fs = X_train[:, selected_indices]
+    X_test_fs = X_test[:, selected_indices]
+
+    model = SVC(C=C, kernel='rbf', gamma=gamma, decision_function_shape="ovr")  # One-vs-All (OAA)
+    model.fit(X_train_fs, y_train)
+
+    y_pred = model.predict(X_test_fs)
+    return -accuracy_score(y_test, y_pred), selected_indices  # Retorna a acurácia negativa e os índices das features escolhidas
+
+# PSO para otimizar parâmetros e escolher 3 features
+def pso_feature_selection(objective_function, lb, ub, feature_names, args, swarm_size=20, max_iter=100):
+    num_features = len(feature_names)
+    lb_extended = lb + [0] * num_features  # Limites inferiores para C, gamma e features
+    ub_extended = ub + [1] * num_features  # Limites superiores para C, gamma e features
+
+    particles = np.random.uniform(low=lb_extended, high=ub_extended, size=(swarm_size, len(lb_extended)))
+    velocities = np.zeros_like(particles)
+
+    personal_best_positions = particles.copy()
+    personal_best_scores = np.array([objective_function(p, *args, feature_names)[0] for p in particles])
+    global_best_position = personal_best_positions[np.argmin(personal_best_scores)]
+
+    w, c1, c2 = 3, 2, 2  # Hiperparâmetros do PSO
+
+    for _ in range(max_iter):
+        for i in range(swarm_size):
+            velocities[i] = (w * velocities[i] +
+                             c1 * random.random() * (personal_best_positions[i] - particles[i]) +
+                             c2 * random.random() * (global_best_position - particles[i]))
+            particles[i] += velocities[i]
+            particles[i] = np.clip(particles[i], lb_extended, ub_extended)
+
+            score, selected_indices = objective_function(particles[i], *args, feature_names)
+
+            if score < personal_best_scores[i]:  # Minimizar erro (-acurácia)
+                personal_best_scores[i] = score
+                personal_best_positions[i] = particles[i]
+
+        global_best_position = personal_best_positions[np.argmin(personal_best_scores)]
+
+    best_C, best_gamma = global_best_position[:2]
+    best_feature_indices = sorted(np.argsort(global_best_position[2:])[-3:])  
+    return best_C, best_gamma, best_feature_indices
+
+# Nomes reais dos padrões no dataset
+pattern_names = [
+    "Normal",
+    "IT",
+    "DT",
+    "CYC",
+    "US",
+    "DS"
+]
+
+# Gráfico 3D dos clusters
+def plot_3d_clusters(X, y, feature_names):
+    fig = plt.figure(figsize=(10, 7))
+    ax = fig.add_subplot(111, projection='3d')
+
+    colors = ['r', 'g', 'b', 'c', 'm', 'y']
+    markers = ['o', '^', 's', 'P', 'D', '*']
+
+    for i in range(6):  # 6 classes
+        indices = np.where(y == i)
+        ax.scatter(X[indices, 0], X[indices, 1], X[indices, 2],
+                   c=colors[i], marker=markers[i], label=pattern_names[i])
+
+    ax.set_xlabel(feature_names[0])
+    ax.set_ylabel(feature_names[1])
+    ax.set_zlabel(feature_names[2])
+    ax.set_title('Visualização 3D dos clusters de classes')
+    ax.legend()
+    plt.show()
+
+if __name__ == "__main__":
+    # Carregar e processar dados
+    data, labels = load_data(file_path)
+    X = extract_features(data)
+    y = labels
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # Definição dos hiperparâmetros e das features
+    feature_names = ["Mean", "Std Dev", "Skewness", "Kurtosis", "Slope (S)", "NC1", "NC2", "AS", "SD", "APML", "APSL", "ASS"]
+    lb = [1, 0]  # Limites inferiores para C e gamma
+    ub = [1000, 1.0]  # Limites superiores para C e gamma
+
+    # Rodar PSO para encontrar os melhores parâmetros e 3 melhores features
+    best_C, best_gamma, best_features = pso_feature_selection(objective_function, lb, ub, feature_names,
+                                                              args=(X_train, y_train, X_test, y_test))
+
+    # Treinar o modelo final com as 3 melhores features
+    X_train_fs = X_train[:, best_features]
+    X_test_fs = X_test[:, best_features]
+
+    final_model = SVC(C=best_C, kernel='rbf', gamma=best_gamma, decision_function_shape="ovo")
+    final_model.fit(X_train_fs, y_train)
+    y_pred = final_model.predict(X_test_fs)
+
+    # Mostrar resultados
+    selected_features_names = [feature_names[i] for i in best_features]
+    print(f"Melhores features selecionadas: {selected_features_names}")
+    print(f"Melhores parâmetros: C={best_C}, Gamma={best_gamma}")
+    print(f"Acurácia final: {accuracy_score(y_test, y_pred):.4f}")
+
+    # Gráfico 3D dos clusters
+    plot_3d_clusters(X[:, best_features], y, selected_features_names)
