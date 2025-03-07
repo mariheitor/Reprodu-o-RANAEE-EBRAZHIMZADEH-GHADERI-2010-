@@ -1,0 +1,76 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.svm import SVC
+from sklearn.metrics import accuracy_score, confusion_matrix
+from scipy.stats import skew, kurtosis
+import urllib.request
+
+# Baixar os dados
+url = "https://kdd.ics.uci.edu/databases/synthetic_control/synthetic_control.data"
+file_path = "synthetic_control.data"
+urllib.request.urlretrieve(url, file_path)
+
+# Carregar os dados
+def load_data(file_path):
+    data = np.loadtxt(file_path)
+    labels = np.repeat(np.arange(6), 100)  # 6 classes, 100 instâncias cada
+    return data, labels
+
+# Extração de características
+def extract_features(data):
+    features = []
+    for series in data:
+        feature_vector = [
+            np.mean(series),
+            np.std(series),
+            skew(series),
+            kurtosis(series),
+            np.polyfit(range(len(series)), series, 1)[0],  # Slope (S)
+            np.sum(np.diff(np.sign(series - np.mean(series)))) // 2,  # NC1
+            np.sum(np.diff(np.sign(series - np.polyfit(range(len(series)), series, 1)[1]))) // 2,  # NC2
+            np.mean(np.abs(np.diff(series))),  # AS
+            np.abs(np.polyfit(range(len(series)), series, 1)[0] - np.mean(np.abs(np.diff(series)))),  # SD
+            np.sum(np.abs(series - np.mean(series))),  # APML
+            np.sum(np.abs(series - np.polyfit(range(len(series)), series, 1)[1])),  # APSL
+            np.sum(np.abs(np.polyfit(range(len(series)), series, 1)[1] - np.mean(np.abs(np.diff(series))))),  # ASS
+        ]
+        features.append(feature_vector)
+    return np.array(features)
+
+if __name__ == "__main__":
+    # Carregar e processar os dados
+    data, labels = load_data(file_path)
+    X = extract_features(data)
+    y = labels
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # Definir manualmente os parâmetros e as features a serem usadas
+    selected_features = [0, 1, 2, 3, 7, 8, 11]
+    C_manual = 1000  # Valor de C definido manualmente
+    gamma_manual = 0.00951  # Valor de Gamma definido manualmente
+
+    # Treinar e avaliar o modelo
+    final_model = SVC(C=C_manual, kernel='rbf', gamma=gamma_manual, decision_function_shape="ovo")
+    final_model.fit(X_train[:, selected_features], y_train)
+    y_pred = final_model.predict(X_test[:, selected_features])
+
+    # Exibir resultados
+    feature_names = ["Mean", "Std Dev", "Skewness", "Kurtosis", "Slope (S)", "NC1", "NC2", "AS", "SD", "APML", "APSL", "ASS"]
+    selected_feature_names = [feature_names[i] for i in selected_features]
+
+    print(f"Features selecionadas: {selected_feature_names}")
+    print(f"Parâmetros definidos: C={C_manual}, Gamma={gamma_manual}")
+    print(f"Acurácia do modelo: {accuracy_score(y_test, y_pred):.4f}")
+
+    # Criar matriz de confusão
+    class_labels = ["NOR", "CYC", "IT", "DT", "US", "DS"]
+    conf_matrix = confusion_matrix(y_test, y_pred)
+    conf_df = pd.DataFrame(conf_matrix, index=class_labels, columns=class_labels)
+    conf_df_percentage = conf_df.div(conf_df.sum(axis=1), axis=0) * 100
+    conf_df_percentage = conf_df_percentage.fillna(0).round(2)
+
+    print("Matriz de Confusão - OAO (em %):")
+    print(conf_df_percentage)
