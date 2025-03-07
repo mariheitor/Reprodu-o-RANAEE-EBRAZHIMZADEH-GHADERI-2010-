@@ -1,0 +1,130 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.svm import SVC
+from sklearn.metrics import accuracy_score
+from scipy.stats import skew, kurtosis
+import random
+import urllib.request
+from sklearn.metrics import confusion_matrix
+import pandas as pd
+
+# Baixar os dados
+url = "https://kdd.ics.uci.edu/databases/synthetic_control/synthetic_control.data"
+file_path = "synthetic_control.data"
+urllib.request.urlretrieve(url, file_path)
+
+# Carregar os dados
+def load_data(file_path):
+    data = np.loadtxt(file_path)
+    labels = np.repeat(np.arange(6), 100)  # 6 classes, 100 instâncias cada
+    return data, labels
+
+# Extração de características
+def extract_features(data):
+    features = []
+    for series in data:
+        feature_vector = [
+            np.mean(series),
+            np.std(series),
+            skew(series),
+            kurtosis(series),
+            np.polyfit(range(len(series)), series, 1)[0],  # Slope (S)
+            np.sum(np.diff(np.sign(series - np.mean(series)))) // 2,  # NC1
+            np.sum(np.diff(np.sign(series - np.polyfit(range(len(series)), series, 1)[1]))) // 2,  # NC2
+            np.mean(np.abs(np.diff(series))),  # AS
+            np.abs(np.polyfit(range(len(series)), series, 1)[0] - np.mean(np.abs(np.diff(series)))),  # SD
+            np.sum(np.abs(series - np.mean(series))),  # APML
+            np.sum(np.abs(series - np.polyfit(range(len(series)), series, 1)[1])),  # APSL
+            np.sum(np.abs(np.polyfit(range(len(series)), series, 1)[1] - np.mean(np.abs(np.diff(series))))),  # ASS
+        ]
+        features.append(feature_vector)
+    return np.array(features)
+
+# Função para otimizar os parâmetros com PSO
+def objective_function(params, X_train, y_train, X_test, y_test, selected_features):
+    C, gamma = params[:2]
+    selected_indices = [i for i, f in enumerate(params[2:]) if f > 0.5]
+
+    if not selected_indices:
+        return float('inf')
+
+    X_train_fs = X_train[:, selected_indices]
+    X_test_fs = X_test[:, selected_indices]
+    model = SVC(C=C, kernel='rbf', gamma=gamma)
+    model.fit(X_train_fs, y_train)
+    y_pred = model.predict(X_test_fs)
+    return -accuracy_score(y_test, y_pred)  # Maximizar precisão (minimizar negativo)
+
+# Função para a otimização com PSO simples
+def pso_simple(objective_function, lb, ub, feature_selection, args, swarm_size=20, max_iter=100):
+    lb_extended = lb + [0] * len(feature_selection)  # Limites para seleção de features
+    ub_extended = ub + [1] * len(feature_selection)
+    particles = np.random.uniform(low=lb_extended, high=ub_extended, size=(swarm_size, len(lb_extended)))
+    velocities = np.zeros_like(particles)
+    personal_best_positions = particles.copy()
+    personal_best_scores = np.array([objective_function(p, *args, feature_selection) for p in particles])
+    global_best_position = personal_best_positions[np.argmin(personal_best_scores)]
+
+    w = 3.0  # Fator de inércia
+    c1 = 2  # Fator cognitivo
+    c2 = 2  # Fator social
+
+    for _ in range(max_iter):
+        for i in range(swarm_size):
+            velocities[i] = (w * velocities[i] +
+                             c1 * random.random() * (personal_best_positions[i] - particles[i]) +
+                             c2 * random.random() * (global_best_position - particles[i]))
+            particles[i] += velocities[i]
+            particles[i] = np.clip(particles[i], lb_extended, ub_extended)
+
+            score = objective_function(particles[i], *args, feature_selection)
+
+            if score < personal_best_scores[i]:
+                personal_best_scores[i] = score
+                personal_best_positions[i] = particles[i]
+
+        global_best_position = personal_best_positions[np.argmin(personal_best_scores)]
+
+    return global_best_position[:2], [i for i, f in enumerate(global_best_position[2:]) if f > 0.5]
+
+if __name__ == "__main__":
+    data, labels = load_data(file_path)
+    X = extract_features(data)
+    y = labels
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    lb = [1, 0]  # Limites inferiores para C e gamma
+    ub = [1000, 1.0]  # Limites superiores para C e gamma
+    feature_selection = [1] * X.shape[1]
+
+    best_params, best_features = pso_simple(objective_function, lb, ub, feature_selection, args=(X_train, y_train, X_test, y_test))
+
+    best_C, best_gamma = best_params
+    final_model = SVC(C=best_C, kernel='rbf', gamma=best_gamma, decision_function_shape="ovo") #one-vs-one (OAO)
+    final_model.fit(X_train[:, best_features], y_train)
+    y_pred = final_model.predict(X_test[:, best_features])
+
+    selected_feature_names = ["Mean", "Std Dev", "Skewness", "Kurtosis", "Slope (S)", "NC1", "NC2", "AS", "SD", "APML", "APSL", "ASS"]
+    selected_features = [selected_feature_names[i] for i in best_features]
+
+    print(f"Features selecionadas: {selected_features}")
+    print(f"Melhores parâmetros: C={best_C}, Gamma={best_gamma}")
+    print(f"Acurácia do modelo otimizado: {accuracy_score(y_test, y_pred):.4f}")
+
+# Criar matriz de confusão
+class_labels = ["NOR", "CYC", "IT", "DT", "US", "DS"]
+conf_matrix = confusion_matrix(y_test, y_pred)
+
+# Criar DataFrame para visualização
+conf_df = pd.DataFrame(conf_matrix, index=class_labels, columns=class_labels)
+
+# Adicionar porcentagens de acerto
+conf_df_percentage = conf_df.div(conf_df.sum(axis=1), axis=0) * 100
+conf_df_percentage = conf_df_percentage.fillna(0).round(2)
+
+# Exibir a tabela formatada
+print("Matriz de Confusão - OAO (em %):")
+print(conf_df_percentage)
